@@ -80,7 +80,7 @@ async def handle_url(client, message):
 
         if thumbnail:
             await msg.delete()
-            await message.reply_photo(photo=thumbnail, caption=caption, reply_markup=button)
+            await message.reply_photo(photo=thumbnail, caption=caption, reply_markup=button,has_spoiler=True)
         else:
             await msg.edit(caption, reply_markup=button)
 
