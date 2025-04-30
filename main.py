@@ -8,7 +8,7 @@ import threading
 # ====== BOT CONFIG =======
 API_ID = "14050586" # Replace with your API ID
 API_HASH = "42a60d9c657b106370c79bb0a8ac560c"
-BOT_TOKEN = "your_bot_token"
+BOT_TOKEN = "7798620652:AAEhX-uWcEmAGxFjFemOjiUUPzH8t1Os90M"
 
 bot = Client("xmaster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 app = Flask(__name__)
@@ -30,8 +30,8 @@ def keep_alive():
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Support", url="https://t.me/YourSupportGroup")],
-        [InlineKeyboardButton("Source", url="https://github.com/YourRepo")]
+        [InlineKeyboardButton("Support", url="https://t.me/cutedevloper")],
+        [InlineKeyboardButton("Update", url="https://t.me/cutedevlopers")]
     ])
     await message.reply(
         f"Hi {message.from_user.mention},\n\n"
