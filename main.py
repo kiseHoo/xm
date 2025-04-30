@@ -6,8 +6,8 @@ from flask import Flask
 import threading
 
 # ====== BOT CONFIG =======
-API_ID = 123456  # Replace with your API ID
-API_HASH = "your_api_hash"
+API_ID = "14050586" # Replace with your API ID
+API_HASH = "42a60d9c657b106370c79bb0a8ac560c"
 BOT_TOKEN = "your_bot_token"
 
 bot = Client("xmaster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
