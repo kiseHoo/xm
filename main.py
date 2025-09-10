@@ -115,7 +115,7 @@ async def handle_download(client, callback_query: CallbackQuery):
 
         await callback_query.message.reply_video(
             video=filename,
-            caption=f"**{data['title']}**\nUploaded by @YourBot"
+            caption=f"**{data['title']}**\nUploaded "
         )
 
         os.remove(filename)
