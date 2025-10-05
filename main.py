@@ -1,17 +1,16 @@
+import os
+import threading
+import yt_dlp
+from dotenv import load_dotenv
+from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-import yt_dlp
-import os
-from flask import Flask
-import threading
-from dotenv import load_dotenv
-import re
 
-# Load .env file
+# Load env
 load_dotenv()
 
 # ====== BOT CONFIG =======
-API_ID = "14050586"  # replace if needed
+API_ID = 14050586
 API_HASH = "42a60d9c657b106370c79bb0a8ac560c"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -29,17 +28,7 @@ def run():
 
 def keep_alive():
     thread = threading.Thread(target=run)
-    thread.daemon = True
     thread.start()
-
-# helper: sanitize filename
-def sanitize_filename(s):
-    s = s or "video"
-    s = re.sub(r'[\\/*?:"<>|]', "", s)
-    s = s.strip()
-    if len(s) > 120:
-        s = s[:120]
-    return s
 
 # ====== START COMMAND =======
 @bot.on_message(filters.command("start") & filters.private)
@@ -50,10 +39,39 @@ async def start_handler(client, message):
     ])
     await message.reply(
         f"Hi {message.from_user.mention},\n\n"
-        "**Send me any video URL from XMaster (or supported sites) to fetch and download it.**\n\n"
+        "**Send me any video URL (XHamster, PH, etc.) to fetch and download it.**\n\n"
         "__Educational use only__",
         reply_markup=btn
     )
+
+# ====== DOWNLOAD FUNCTION =======
+def safe_download(url, path="downloads/"):
+    os.makedirs(path, exist_ok=True)
+
+    ydl_opts = {
+        "outtmpl": f"{path}%(title)s.%(ext)s",
+        "format": "best",
+        "noplaylist": True,
+        "ignoreerrors": True,
+        "geo_bypass": True,
+        "quiet": True,
+        "nocheckcertificate": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                raise Exception("Extractor failed")
+            return f"{path}{info.get('title', 'video')}.{info.get('ext', 'mp4')}", info
+    except Exception as e:
+        print(f"⚠️ Normal extractor failed: {e}")
+        ydl_opts["force_generic_extractor"] = True
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                raise Exception("Generic extractor failed too")
+            return f"{path}{info.get('title', 'video')}.{info.get('ext', 'mp4')}", info
 
 # ====== URL HANDLER =======
 @bot.on_message(filters.private & filters.text & ~filters.command("start"))
@@ -61,32 +79,21 @@ async def handle_url(client, message):
     url = message.text.strip()
 
     if not url.startswith("http"):
-        return await message.reply("Please send a valid video URL.")
+        return await message.reply("❌ Please send a valid video URL.")
 
-    msg = await message.reply("Analyzing video...")
+    msg = await message.reply("🔎 Analyzing video...")
 
     try:
-        # Use extract_info but do NOT rely on info['url'] for later download.
-        ydl_opts = {
-            'quiet': True,
-            'noplaylist': True,
-            'skip_download': True,
-            # 'format': 'best'  # optional
-        }
-
+        # Just get info without downloading
+        ydl_opts = {"quiet": True, "skip_download": True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        title = info.get("title") or "video"
-        thumbnail = info.get("thumbnail", None)
-        ext = info.get("ext") or "mp4"
+        title = info.get("title", "Unknown")
+        ext = info.get("ext", "mp4")
+        thumbnail = info.get("thumbnail")
 
-        # store original page URL (not the ephemeral media url)
-        download_data[str(message.from_user.id)] = {
-            "page_url": url,
-            "title": title,
-            "ext": ext
-        }
+        download_data[str(message.from_user.id)] = {"url": url}
 
         button = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶️ Download Now", callback_data="download_video")]
@@ -94,11 +101,16 @@ async def handle_url(client, message):
 
         caption = f"**Title:** `{title}`\n**Type:** `{ext}`"
 
+        await msg.delete()
         if thumbnail:
-            await msg.delete()
-            await message.reply_photo(photo=thumbnail, caption=caption, reply_markup=button, has_spoiler=True)
+            await message.reply_photo(
+                photo=thumbnail,
+                caption=caption,
+                reply_markup=button,
+                has_spoiler=True
+            )
         else:
-            await msg.edit(caption, reply_markup=button)
+            await message.reply(caption, reply_markup=button)
 
     except Exception as e:
         await msg.edit(f"❌ Error while analyzing: `{e}`")
@@ -110,52 +122,20 @@ async def handle_download(client, callback_query: CallbackQuery):
     data = download_data.get(user_id)
 
     if not data:
-        return await callback_query.message.reply("Session expired. Please send the URL again.")
+        return await callback_query.message.reply("⚠️ Session expired. Please send the URL again.")
 
-    await callback_query.answer("Downloading...")
+    url = data["url"]
+    await callback_query.answer("⬇️ Downloading...")
 
     try:
-        original_page = data["page_url"]
-        title = sanitize_filename(data.get("title"))
-        ext = data.get("ext", "mp4")
-        filename = f"{title}.{ext}"
+        file_path, info = safe_download(url)
 
-        # ensure unique filename
-        i = 1
-        basefn = filename
-        while os.path.exists(filename):
-            filename = f"{title}_{i}.{ext}"
-            i += 1
+        await callback_query.message.reply_video(
+            video=file_path,
+            caption=f"✅ **{info.get('title','Video')}**\nUploaded successfully!"
+        )
 
-        ydl_opts = {
-            'outtmpl': filename,
-            'quiet': True,
-            'noplaylist': True,
-            'format': 'best',  # choose best available single-file format
-            # if you have ffmpeg on server and want merged mp4: 'format': 'bestvideo+bestaudio/best', 'merge_output_format': 'mp4'
-        }
-
-        # Download using the original page URL so yt-dlp can re-extract valid media URLs.
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([original_page])
-
-        # Try to send as video; fallback to document if it fails (size, or format)
-        try:
-            await callback_query.message.reply_video(
-                video=filename,
-                caption=f"**{title}**\nUploaded "
-            )
-        except Exception as send_exc:
-            # fallback
-            await callback_query.message.reply_document(
-                document=filename,
-                caption=f"**{title}**\n(Uploaded as document because video upload failed: {send_exc})"
-            )
-
-        # cleanup
-        if os.path.exists(filename):
-            os.remove(filename)
-
+        os.remove(file_path)
     except Exception as e:
         await callback_query.message.reply(f"❌ Upload failed: `{e}`")
 
