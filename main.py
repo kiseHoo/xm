@@ -44,6 +44,46 @@ async def start_handler(client, message):
         reply_markup=btn
     )
 
+# ====== ANALYZE FUNCTION =======
+def analyze_url(url):
+    try:
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "ignoreerrors": True,
+            "geo_bypass": True,
+            "nocheckcertificate": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if not info:
+            raise Exception("Extractor failed")
+
+        return {
+            "title": info.get("title", "Unknown"),
+            "ext": info.get("ext", "mp4"),
+            "thumbnail": info.get("thumbnail")
+        }
+
+    except Exception as e:
+        print(f"⚠️ Normal analyze failed: {e}")
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "force_generic_extractor": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            raise Exception("Generic extractor failed too")
+
+        return {
+            "title": info.get("title", "Unknown"),
+            "ext": info.get("ext", "mp4"),
+            "thumbnail": info.get("thumbnail")
+        }
+
 # ====== DOWNLOAD FUNCTION =======
 def safe_download(url, path="downloads/"):
     os.makedirs(path, exist_ok=True)
@@ -65,7 +105,7 @@ def safe_download(url, path="downloads/"):
                 raise Exception("Extractor failed")
             return f"{path}{info.get('title', 'video')}.{info.get('ext', 'mp4')}", info
     except Exception as e:
-        print(f"⚠️ Normal extractor failed: {e}")
+        print(f"⚠️ Normal download failed: {e}")
         ydl_opts["force_generic_extractor"] = True
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -84,27 +124,19 @@ async def handle_url(client, message):
     msg = await message.reply("🔎 Analyzing video...")
 
     try:
-        # Just get info without downloading
-        ydl_opts = {"quiet": True, "skip_download": True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        title = info.get("title", "Unknown")
-        ext = info.get("ext", "mp4")
-        thumbnail = info.get("thumbnail")
-
+        info = analyze_url(url)
         download_data[str(message.from_user.id)] = {"url": url}
 
         button = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶️ Download Now", callback_data="download_video")]
         ])
 
-        caption = f"**Title:** `{title}`\n**Type:** `{ext}`"
+        caption = f"**Title:** `{info['title']}`\n**Type:** `{info['ext']}`"
 
         await msg.delete()
-        if thumbnail:
+        if info["thumbnail"]:
             await message.reply_photo(
-                photo=thumbnail,
+                photo=info["thumbnail"],
                 caption=caption,
                 reply_markup=button,
                 has_spoiler=True
