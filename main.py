@@ -22,11 +22,11 @@ API_ID = int(os.getenv("API_ID", "14050586"))
 API_HASH = os.getenv("API_HASH", "42a60d9c657b106370c79bb0a8ac560c")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Owner & channels (set these in .env OR use defaults here)
-OWNER_ID = int(os.getenv("OWNER_ID", "5738579437"))  # change if needed
-FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1", "@CuteBotUpdate")  # e.g. @YourChannel
-FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2", "@SkyRexo")        # e.g. @YourSecondChannel
-DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "-1003328559256"))   # e.g. -1001234567890
+# Owner & channels
+OWNER_ID = int(os.getenv("OWNER_ID", "5738579437"))
+FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1", "@CuteBotUpdate")
+FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2", "@SkyRexo")
+DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "-1003328559256"))  # dump / storage channel
 
 bot = Client("xmaster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -101,23 +101,36 @@ def make_progress_bar(percent: int) -> str:
     return f"[{bar}] {percent}%"
 
 
-# ====== ANALYZE FUNCTION =======
+# ====== ANALYZE FUNCTION (IMPROVED TIMEOUT / RETRIES) =======
 def analyze_url(url: str):
-    """Get basic info (title, ext, thumbnail) using yt-dlp."""
+    """
+    Get basic info (title, ext, thumbnail) using yt-dlp.
+    Uses higher timeout & retries to avoid 'timed out' TransportError.
+    """
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
         "geo_bypass": True,
-        "ignoreerrors": False,
+        "ignoreerrors": True,
         "nocheckcertificate": True,
-        "allow_unplayable_formats": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 40,
+        "concurrent_fragment_downloads": 1,
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         },
-        "retries": 3,
-        "socket_timeout": 15,
     }
 
+    def _pick_info(info):
+        # Sometimes yt-dlp returns playlist-like dict
+        if info is None:
+            return None
+        if "entries" in info and isinstance(info["entries"], list) and info["entries"]:
+            return info["entries"][0]
+        return info
+
+    info = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -127,8 +140,9 @@ def analyze_url(url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
+    info = _pick_info(info)
     if not info:
-        raise Exception("Failed to extract info from URL")
+        raise Exception("Failed to extract info from URL (maybe blocked / private)")
 
     return {
         "title": info.get("title", "Unknown"),
@@ -139,24 +153,37 @@ def analyze_url(url: str):
 
 # ====== DOWNLOAD FUNCTION (SYNC, USED IN THREAD) =======
 def safe_download(url: str, fmt: str, path: str = "downloads/"):
+    """
+    Blocking download with yt-dlp, used inside executor (thread).
+    Uses id-based filename to avoid invalid characters, higher timeout/retries.
+    """
     os.makedirs(path, exist_ok=True)
 
     ydl_opts = {
-        "outtmpl": f"{path}%(title)s.%(ext)s",
+        "outtmpl": os.path.join(path, "%(id)s.%(ext)s"),
         "format": fmt,
         "noplaylist": True,
-        "ignoreerrors": False,
+        "ignoreerrors": True,
         "geo_bypass": True,
         "quiet": True,
         "nocheckcertificate": True,
-        "allow_unplayable_formats": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 40,
+        "concurrent_fragment_downloads": 1,
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         },
-        "retries": 3,
-        "socket_timeout": 30,
     }
 
+    def _pick_info(info):
+        if info is None:
+            return None
+        if "entries" in info and isinstance(info["entries"], list) and info["entries"]:
+            return info["entries"][0]
+        return info
+
+    info = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -166,16 +193,17 @@ def safe_download(url: str, fmt: str, path: str = "downloads/"):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
+    info = _pick_info(info)
     if not info:
         raise Exception("Download failed, no info returned")
 
-    title = info.get("title", "video")
+    vid_id = info.get("id", "file")
     ext = info.get("ext", "mp4")
-    file_path = f"{path}{title}.{ext}"
+    file_path = os.path.join(path, f"{vid_id}.{ext}")
     return file_path, info
 
 
-# ====== PROGRESS CALLBACK (UPLOAD) =======
+# ====== PROGRESS CALLBACK (UPLOAD TO USER) =======
 def upload_progress(current, total, message):
     try:
         if not total:
@@ -389,7 +417,7 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
 
         title = info.get("title", "Video")
 
-        # Upload to dump channel first (storage)
+        # Upload to dump channel first (storage) -> Always get file_id for share link
         dump_msg = None
         file_id = None
         if DUMP_CHANNEL != 0:
@@ -405,15 +433,16 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
         if dump_msg and dump_msg.video:
             file_id = dump_msg.video.file_id
 
-        # If no dump channel or failed, upload directly to user
         sent_to_user = None
+
         if file_id:
+            # Use file_id (fast, no re-upload)
             sent_to_user = await callback_query.message.reply_video(
                 video=file_id,
                 caption=f"✅ **{title}**\nUploaded successfully!",
             )
         else:
-            # show upload progress bar
+            # fallback: direct upload to user with progress
             await status_msg.edit(
                 "📤 **Uploading…**\n" + make_progress_bar(0)
             )
@@ -425,6 +454,13 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
             )
             if sent_to_user and sent_to_user.video:
                 file_id = sent_to_user.video.file_id
+
+        # Delete local file to save space
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
 
         # Shareable link via /start=<file_id>
         share_link = None
@@ -438,13 +474,6 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
         # Clean up download message
         try:
             await status_msg.edit("✅ **Done!**")
-        except Exception:
-            pass
-
-        # Delete local file to save space
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
         except Exception:
             pass
 
