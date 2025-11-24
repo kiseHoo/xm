@@ -23,8 +23,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Owner & channels (set these in .env)
 OWNER_ID = int(os.getenv("OWNER_ID", "5738579437"))  # change if needed
-FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1","")  # e.g. @YourChannel
-FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2", None)  # e.g. @YourSecondChannel
+FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1","@CuteBotUpdate")  # e.g. @YourChannel
+FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2","@CuteDevlopers")  # e.g. @YourSecondChannel
 DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "0"))    # e.g. -1001234567890
 
 bot = Client("xmaster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
