@@ -2,6 +2,7 @@ import os
 import threading
 import asyncio
 import yt_dlp
+import math
 
 from dotenv import load_dotenv
 from flask import Flask
@@ -21,11 +22,11 @@ API_ID = int(os.getenv("API_ID", "14050586"))
 API_HASH = os.getenv("API_HASH", "42a60d9c657b106370c79bb0a8ac560c")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Owner & channels (set these in .env)
+# Owner & channels (set these in .env OR use defaults here)
 OWNER_ID = int(os.getenv("OWNER_ID", "5738579437"))  # change if needed
-FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1","@CuteBotUpdate")  # e.g. @YourChannel
-FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2","@SkyRexo")  # e.g. @YourSecondChannel
-DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "-1003328559256"))    # e.g. -1001234567890
+FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1", "@CuteBotUpdate")  # e.g. @YourChannel
+FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2", "@SkyRexo")        # e.g. @YourSecondChannel
+DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "-1003328559256"))   # e.g. -1001234567890
 
 bot = Client("xmaster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -58,12 +59,14 @@ async def check_force_join(client: Client, user_id: int):
             continue
         try:
             member = await client.get_chat_member(ch, user_id)
+            # banned/kicked => no access
             if member.status in ("banned", "kicked"):
                 return False, ch
         except UserNotParticipant:
+            # user not participant
             return False, ch
         except Exception:
-            # ignore invalid channel or other errors
+            # ignore invalid channel or other errors (bot not admin etc.)
             continue
     return True, None
 
@@ -82,6 +85,22 @@ def get_force_join_keyboard():
     return InlineKeyboardMarkup(btns)
 
 
+# ====== PROGRESS BAR HELPER ======
+def make_progress_bar(percent: int) -> str:
+    """
+    Creates a bar like: [■■■■□□□] 40%
+    10 blocks total, 1 block per 10%
+    """
+    if percent < 0:
+        percent = 0
+    if percent > 100:
+        percent = 100
+    filled_blocks = percent // 10
+    empty_blocks = 10 - filled_blocks
+    bar = "■" * filled_blocks + "□" * empty_blocks
+    return f"[{bar}] {percent}%"
+
+
 # ====== ANALYZE FUNCTION =======
 def analyze_url(url: str):
     """Get basic info (title, ext, thumbnail) using yt-dlp."""
@@ -95,6 +114,8 @@ def analyze_url(url: str):
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         },
+        "retries": 3,
+        "socket_timeout": 15,
     }
 
     try:
@@ -132,6 +153,8 @@ def safe_download(url: str, fmt: str, path: str = "downloads/"):
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         },
+        "retries": 3,
+        "socket_timeout": 30,
     }
 
     try:
@@ -155,11 +178,26 @@ def safe_download(url: str, fmt: str, path: str = "downloads/"):
 # ====== PROGRESS CALLBACK (UPLOAD) =======
 def upload_progress(current, total, message):
     try:
-        percent = int(current * 100 / total) if total else 0
-        text = f"📤 Uploading... {percent}%"
-        # schedule async edit on event loop
-        if percent % 5 == 0:  # reduce spam
-            bot.loop.create_task(message.edit_text(text))
+        if not total:
+            return
+        percent = math.floor(current * 100 / total)
+        if percent < 0 or percent > 100:
+            return
+        # reduce spam -> update every 5%
+        if percent % 5 != 0:
+            return
+
+        bar = make_progress_bar(percent)
+        text = f"**📤 Uploading...**\n**{bar}**"
+
+        async def edit():
+            try:
+                await message.edit_text(text)
+            except Exception:
+                pass
+
+        bot.loop.create_task(edit())
+
     except Exception:
         pass
 
@@ -173,7 +211,7 @@ async def start_handler(client: Client, message):
         try:
             await message.reply_video(
                 video=file_id,
-                caption="🔁 Your requested file",
+                caption="🔁 **Here is your requested file!**",
             )
         except Exception as e:
             await message.reply(f"❌ Failed to send file: `{e}`")
@@ -183,7 +221,8 @@ async def start_handler(client: Client, message):
     ok, ch = await check_force_join(client, message.from_user.id)
     if not ok:
         await message.reply(
-            "🚫 You must join the required channels to use this bot.",
+            "🚫 **Access Denied!**\n\n"
+            "First join the required channels to use this bot.",
             reply_markup=get_force_join_keyboard(),
         )
         return
@@ -201,15 +240,19 @@ async def start_handler(client: Client, message):
 
     btn = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Support", url="https://t.me/cutedevloper")],
-            [InlineKeyboardButton("Update", url="https://t.me/cutedevlopers")],
+            [InlineKeyboardButton("💬 Support", url="https://t.me/cutedevloper")],
+            [InlineKeyboardButton("📡 Update", url="https://t.me/cutedevlopers")],
         ]
     )
 
     await message.reply(
-        f"Hi {message.from_user.mention},\n\n"
-        "📥 **Send me any supported video URL (XHamster, PH, etc.)**\n"
-        "I will fetch details and let you choose quality.\n\n"
+        f"👋 **Hi {message.from_user.mention}!**\n\n"
+        "📥 Send me any supported **video URL** (XHamster, PH, etc.)\n"
+        "I will:\n"
+        "• 🔍 Fetch details & thumbnail\n"
+        "• 🎚️ Let you choose quality\n"
+        "• 📥 Download & 📤 Upload\n"
+        "• 🔗 Give you shareable link via bot\n\n"
         "__For educational/demo use only.__",
         reply_markup=btn,
     )
@@ -236,19 +279,27 @@ async def refresh_join(client: Client, callback_query: CallbackQuery):
 async def handle_url(client: Client, message):
     url = message.text.strip()
 
+    # Block Telegram links (yt-dlp unsupported)
+    if "t.me/" in url:
+        return await message.reply(
+            "❌ **Telegram links are not supported.**\n\n"
+            "Please send a direct video page URL like XHamster / PH etc."
+        )
+
     # Force join check
     ok, ch = await check_force_join(client, message.from_user.id)
     if not ok:
         await message.reply(
-            "🚫 You must join the required channels to use this bot.",
+            "🚫 **Access Denied!**\n\n"
+            "First join the required channels to use this bot.",
             reply_markup=get_force_join_keyboard(),
         )
         return
 
     if not url.startswith("http"):
-        return await message.reply("❌ Please send a valid video URL.")
+        return await message.reply("❌ Please send a **valid video URL**.")
 
-    msg = await message.reply("🔎 Analyzing video, please wait...")
+    msg = await message.reply("🔎 **Analyzing video…** Please wait...")
 
     try:
         info = analyze_url(url)
@@ -258,20 +309,21 @@ async def handle_url(client: Client, message):
         buttons = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("360p", callback_data="download_360"),
-                    InlineKeyboardButton("480p", callback_data="download_480"),
+                    InlineKeyboardButton("💜 360p", callback_data="download_360"),
+                    InlineKeyboardButton("💙 480p", callback_data="download_480"),
                 ],
                 [
-                    InlineKeyboardButton("720p", callback_data="download_720"),
-                    InlineKeyboardButton("Best", callback_data="download_best"),
+                    InlineKeyboardButton("💗 720p", callback_data="download_720"),
+                    InlineKeyboardButton("💛 BEST", callback_data="download_best"),
                 ],
             ]
         )
 
         caption = (
-            f"**Title:** `{info['title']}`\n"
-            f"**Type:** `{info['ext']}`\n\n"
-            "__Choose your preferred quality to download:__"
+            "✨ **Video Found!**\n\n"
+            f"🎬 **Title:** `{info['title']}`\n"
+            f"🧾 **Type:** `{info['ext']}`\n\n"
+            "🎚️ **Choose your preferred quality to download:**"
         )
 
         await msg.delete()
@@ -286,7 +338,7 @@ async def handle_url(client: Client, message):
             await message.reply(caption, reply_markup=buttons)
 
     except Exception as e:
-        await msg.edit(f"❌ Error while analyzing: `{e}`")
+        await msg.edit(f"❌ **Error while analyzing:** `{e}`")
 
 
 # ====== DOWNLOAD CALLBACK (QUALITY SELECTION) =======
@@ -304,7 +356,8 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
     ok, ch = await check_force_join(client, callback_query.from_user.id)
     if not ok:
         await callback_query.message.reply(
-            "🚫 You must join the required channels to use this bot.",
+            "🚫 **Access Denied!**\n\n"
+            "First join the required channels to use this bot.",
             reply_markup=get_force_join_keyboard(),
         )
         return
@@ -322,7 +375,9 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
     url = data["url"]
 
     await callback_query.answer(f"⬇️ Downloading {quality}...", show_alert=False)
-    status_msg = await callback_query.message.reply("⬇️ Downloading... Please wait.")
+    status_msg = await callback_query.message.reply(
+        "📥 **Downloading…**\n" + make_progress_bar(0)
+    )
 
     loop = asyncio.get_running_loop()
 
@@ -336,6 +391,7 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
 
         # Upload to dump channel first (storage)
         dump_msg = None
+        file_id = None
         if DUMP_CHANNEL != 0:
             try:
                 dump_msg = await client.send_video(
@@ -346,7 +402,6 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
             except Exception as e:
                 print(f"⚠️ Upload to dump channel failed: {e}")
 
-        file_id = None
         if dump_msg and dump_msg.video:
             file_id = dump_msg.video.file_id
 
@@ -358,6 +413,10 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
                 caption=f"✅ **{title}**\nUploaded successfully!",
             )
         else:
+            # show upload progress bar
+            await status_msg.edit(
+                "📤 **Uploading…**\n" + make_progress_bar(0)
+            )
             sent_to_user = await callback_query.message.reply_video(
                 video=file_path,
                 caption=f"✅ **{title}**\nUploaded successfully!",
@@ -376,8 +435,9 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
             username = BOT_USERNAME_CACHE["username"]
             share_link = f"https://t.me/{username}?start={file_id}"
 
+        # Clean up download message
         try:
-            await status_msg.delete()
+            await status_msg.edit("✅ **Done!**")
         except Exception:
             pass
 
@@ -396,7 +456,7 @@ async def handle_download(client: Client, callback_query: CallbackQuery):
 
     except Exception as e:
         try:
-            await status_msg.edit(f"❌ Download/Upload failed: `{e}`")
+            await status_msg.edit(f"❌ **Download/Upload failed:** `{e}`")
         except Exception:
             await callback_query.message.reply(f"❌ Download/Upload failed: `{e}`")
 
