@@ -1,10 +1,8 @@
 import os
-import re
-import math
 import threading
 import asyncio
-from pathlib import Path
 import yt_dlp
+import math
 
 from dotenv import load_dotenv
 from flask import Flask
@@ -16,250 +14,453 @@ from pyrogram.types import (
     CallbackQuery,
 )
 
-# ========= ENV SETUP ========= #
+# ====== ENV LOAD ======
 load_dotenv()
 
-API_ID = int(os.getenv("API_ID","14050586"))
-API_HASH = os.getenv("API_HASH","42a60d9c657b106370c79bb0a8ac560c")
+# ====== BOT CONFIG =======
+API_ID = int(os.getenv("API_ID", "14050586"))
+API_HASH = os.getenv("API_HASH", "42a60d9c657b106370c79bb0a8ac560c")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "5738579437"))
-FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1", "@CuteBotUpdate")
-FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2", "@SkyRexo")
-DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "-1003328559256"))
 
-# ========= BOT INIT ========= #
+# Owner & channels (set these in .env OR use defaults here)
+OWNER_ID = int(os.getenv("OWNER_ID", "5738579437"))  # change if needed
+FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1", "@CuteBotUpdate")  # e.g. @YourChannel
+FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2", "@SkyRexo")        # e.g. @YourSecondChannel
+DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "-1003328559256"))   # e.g. -1001234567890
+
 bot = Client("xmaster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-app = Flask(__name__)
 
-download_data = {}
+app = Flask(__name__)
+download_data = {}  # store per-user URL/session
 BOT_USERNAME_CACHE = {"username": None}
 
-# ========= FLASK KEEP ALIVE ========= #
+# ====== FLASK SERVER =======
 @app.route("/")
 def home():
-    return "🔥 XMaster Downloader is Live!"
+    return "XMaster Downloader Bot is running!"
+
 
 def run():
     app.run(host="0.0.0.0", port=8080)
 
+
 def keep_alive():
-    threading.Thread(target=run).start()
+    thread = threading.Thread(target=run)
+    thread.daemon = True
+    thread.start()
 
 
-# ========= HELPERS ========= #
-async def check_force_join(client, user_id):
-    for ch in [FORCE_CHANNEL_1, FORCE_CHANNEL_2]:
+# ====== FORCE JOIN CHECK ======
+async def check_force_join(client: Client, user_id: int):
+    """Check if user joined required channels."""
+    channels = [FORCE_CHANNEL_1, FORCE_CHANNEL_2]
+    for ch in channels:
         if not ch:
             continue
         try:
-            m = await client.get_chat_member(ch, user_id)
-            if m.status in ["banned", "kicked"]:
-                return False
+            member = await client.get_chat_member(ch, user_id)
+            # banned/kicked => no access
+            if member.status in ("banned", "kicked"):
+                return False, ch
         except UserNotParticipant:
-            return False
-        except:
-            pass
-    return True
-
-def join_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Join 1", url=f"https://t.me/{FORCE_CHANNEL_1.lstrip('@')}")],
-        [InlineKeyboardButton("Join 2", url=f"https://t.me/{FORCE_CHANNEL_2.lstrip('@')}")],
-        [InlineKeyboardButton("✔️ Joined", callback_data="refresh_join")]
-    ])
-
-def make_bar(p):
-    p = max(0, min(p,100))
-    return "["+"■"*(p//10)+"□"*(10-(p//10))+f"] {p}%"
+            # user not participant
+            return False, ch
+        except Exception:
+            # ignore invalid channel or other errors (bot not admin etc.)
+            continue
+    return True, None
 
 
-# ========= FILENAME CLEANER ========= #
-def clean_filename(text: str):
-    return re.sub(r'[\\/*?:"<>|]', "_", text).strip().replace(" ", "_")
+def get_force_join_keyboard():
+    btns = []
+    if FORCE_CHANNEL_1:
+        btns.append(
+            [InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{FORCE_CHANNEL_1.lstrip('@')}")]
+        )
+    if FORCE_CHANNEL_2:
+        btns.append(
+            [InlineKeyboardButton("📢 Join Channel 2", url=f"https://t.me/{FORCE_CHANNEL_2.lstrip('@')}")]
+        )
+    btns.append([InlineKeyboardButton("✅ I Joined", callback_data="refresh_join")])
+    return InlineKeyboardMarkup(btns)
 
 
-# ========= ANALYZE VIDEO ========= #
+# ====== PROGRESS BAR HELPER ======
+def make_progress_bar(percent: int) -> str:
+    """
+    Creates a bar like: [■■■■□□□] 40%
+    10 blocks total, 1 block per 10%
+    """
+    if percent < 0:
+        percent = 0
+    if percent > 100:
+        percent = 100
+    filled_blocks = percent // 10
+    empty_blocks = 10 - filled_blocks
+    bar = "■" * filled_blocks + "□" * empty_blocks
+    return f"[{bar}] {percent}%"
+
+
+# ====== ANALYZE FUNCTION =======
 def analyze_url(url: str):
-    opts = {
+    """Get basic info (title, ext, thumbnail) using yt-dlp."""
+    ydl_opts = {
         "quiet": True,
         "skip_download": True,
-        "ignoreerrors": True,
-        "socket_timeout": 40,
-        "retries": 10,
-        "fragment_retries": 10,
-        "http_headers": {"User-Agent": "Mozilla/5.0"}
+        "geo_bypass": True,
+        "ignoreerrors": False,
+        "nocheckcertificate": True,
+        "allow_unplayable_formats": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        },
+        "retries": 3,
+        "socket_timeout": 15,
     }
-    with yt_dlp.YoutubeDL(opts) as y:
-        info = y.extract_info(url, download=False)
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        # fallback: generic extractor
+        ydl_opts["force_generic_extractor"] = True
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
 
     if not info:
-        raise Exception("Invalid or unsupported link!")
-
-    if "entries" in info:
-        info = info["entries"][0]
+        raise Exception("Failed to extract info from URL")
 
     return {
-        "title": info.get("title", "video"),
-        "thumb": info.get("thumbnail"),
+        "title": info.get("title", "Unknown"),
         "ext": info.get("ext", "mp4"),
+        "thumbnail": info.get("thumbnail"),
     }
 
 
-# ========= DOWNLOAD VIDEO ========= #
-def download_video(url, fmt):
-    Path("downloads").mkdir(exist_ok=True)
+# ====== DOWNLOAD FUNCTION (SYNC, USED IN THREAD) =======
+def safe_download(url: str, fmt: str, path: str = "downloads/"):
+    os.makedirs(path, exist_ok=True)
 
-    opts = {
+    ydl_opts = {
+        "outtmpl": f"{path}%(title)s.%(ext)s",
         "format": fmt,
-        "socket_timeout": 60,
-        "retries": 10,
-        "fragment_retries": 10,
-        "outtmpl": "downloads/%(title)s.%(ext)s",
+        "noplaylist": True,
+        "ignoreerrors": False,
+        "geo_bypass": True,
         "quiet": True,
-        "http_headers": {"User-Agent": "Mozilla/5.0"},
+        "nocheckcertificate": True,
+        "allow_unplayable_formats": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        },
+        "retries": 3,
+        "socket_timeout": 30,
     }
 
-    with yt_dlp.YoutubeDL(opts) as y:
-        info = y.extract_info(url, download=True)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except Exception as e:
+        print(f"⚠️ Normal download failed: {e}")
+        ydl_opts["force_generic_extractor"] = True
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
 
-    if "entries" in info:
-        info = info["entries"][0]
+    if not info:
+        raise Exception("Download failed, no info returned")
 
-    title = clean_filename(info.get("title", "file"))
+    title = info.get("title", "video")
     ext = info.get("ext", "mp4")
-    fpath = f"downloads/{title}.{ext}"
-
-    if not Path(fpath).exists():
-        raise Exception("File missing after download!")
-
-    return fpath, title
+    file_path = f"{path}{title}.{ext}"
+    return file_path, info
 
 
-# ========= PROGRESS UPLOAD ========= #
+# ====== PROGRESS CALLBACK (UPLOAD) =======
 def upload_progress(current, total, message):
     try:
-        p = int(current * 100 / total)
-        if p % 5 != 0:
+        if not total:
             return
-        bar = make_bar(p)
-        bot.loop.create_task(message.edit_text(f"📤 Uploading\n{bar}"))
-    except:
+        percent = math.floor(current * 100 / total)
+        if percent < 0 or percent > 100:
+            return
+        # reduce spam -> update every 5%
+        if percent % 5 != 0:
+            return
+
+        bar = make_progress_bar(percent)
+        text = f"**📤 Uploading...**\n**{bar}**"
+
+        async def edit():
+            try:
+                await message.edit_text(text)
+            except Exception:
+                pass
+
+        bot.loop.create_task(edit())
+
+    except Exception:
         pass
 
 
-# ========= /start ========= #
+# ====== START COMMAND =======
 @bot.on_message(filters.command("start") & filters.private)
-async def start(_, m):
-    if len(m.command) > 1:  # File restore link
+async def start_handler(client: Client, message):
+    # /start <file_id> support (file-sharing link)
+    if len(message.command) > 1:
+        file_id = message.command[1]
         try:
-            return await m.reply_video(m.command[1])
-        except:
-            return
+            await message.reply_video(
+                video=file_id,
+                caption="🔁 **Here is your requested file!**",
+            )
+        except Exception as e:
+            await message.reply(f"❌ Failed to send file: `{e}`")
+        return
 
-    if not await check_force_join(_, m.from_user.id):
-        return await m.reply("Join First!", reply_markup=join_keyboard())
+    # Force join check
+    ok, ch = await check_force_join(client, message.from_user.id)
+    if not ok:
+        await message.reply(
+            "🚫 **Access Denied!**\n\n"
+            "First join the required channels to use this bot.",
+            reply_markup=get_force_join_keyboard(),
+        )
+        return
 
-    await m.reply(
-        f"👋 Hi {m.from_user.mention}\nSend any **video link** to download!",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Support", url="https://t.me/cutedevloper")],
-            [InlineKeyboardButton("Updates", url="https://t.me/cutedevlopers")]
-        ])
+    # Owner notification (simple)
+    if OWNER_ID:
+        try:
+            await client.send_message(
+                OWNER_ID,
+                f"🆕 User started bot:\n"
+                f"{message.from_user.mention} (`{message.from_user.id}`)",
+            )
+        except Exception:
+            pass
+
+    btn = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💬 Support", url="https://t.me/cutedevloper")],
+            [InlineKeyboardButton("📡 Update", url="https://t.me/cutedevlopers")],
+        ]
+    )
+
+    await message.reply(
+        f"👋 **Hi {message.from_user.mention}!**\n\n"
+        "📥 Send me any supported **video URL** (XHamster, PH, etc.)\n"
+        "I will:\n"
+        "• 🔍 Fetch details & thumbnail\n"
+        "• 🎚️ Let you choose quality\n"
+        "• 📥 Download & 📤 Upload\n"
+        "• 🔗 Give you shareable link via bot\n\n"
+        "__For educational/demo use only.__",
+        reply_markup=btn,
     )
 
 
-# ========= JOIN REFRESH ========= #
+# ====== FORCE JOIN REFRESH CALLBACK =======
 @bot.on_callback_query(filters.regex("^refresh_join$"))
-async def fj(c,q):
-    if not await check_force_join(c,q.from_user.id):
-        return await q.answer("Join first",show_alert=True)
-    await q.answer("Verified!",show_alert=True)
-    await q.message.delete()
+async def refresh_join(client: Client, callback_query: CallbackQuery):
+    ok, ch = await check_force_join(client, callback_query.from_user.id)
+    if not ok:
+        await callback_query.answer(
+            "❌ Please join all required channels first.", show_alert=True
+        )
+    else:
+        await callback_query.answer("✅ You are verified!", show_alert=True)
+        try:
+            await callback_query.message.delete()
+        except Exception:
+            pass
 
 
-# ========= URL HANDLER ========= #
+# ====== URL HANDLER =======
 @bot.on_message(filters.private & filters.text & ~filters.command("start"))
-async def handle_url(c,m):
-    url=m.text.strip()
+async def handle_url(client: Client, message):
+    url = message.text.strip()
+
+    # Block Telegram links (yt-dlp unsupported)
+    if "t.me/" in url:
+        return await message.reply(
+            "❌ **Telegram links are not supported.**\n\n"
+            "Please send a direct video page URL like XHamster / PH etc."
+        )
+
+    # Force join check
+    ok, ch = await check_force_join(client, message.from_user.id)
+    if not ok:
+        await message.reply(
+            "🚫 **Access Denied!**\n\n"
+            "First join the required channels to use this bot.",
+            reply_markup=get_force_join_keyboard(),
+        )
+        return
+
     if not url.startswith("http"):
-        return await m.reply("Send valid link!")
+        return await message.reply("❌ Please send a **valid video URL**.")
 
-    if not await check_force_join(c,m.from_user.id):
-        return await m.reply("Join First",reply_markup=join_keyboard())
-
-    msg = await m.reply("🔍 Fetching info…")
+    msg = await message.reply("🔎 **Analyzing video…** Please wait...")
 
     try:
         info = analyze_url(url)
-        download_data[str(m.from_user.id)] = url
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("360p",callback_data="d360"),
-             InlineKeyboardButton("480p",callback_data="d480")],
-            [InlineKeyboardButton("720p",callback_data="d720"),
-             InlineKeyboardButton("BEST",callback_data="dbest")]
-        ])
+        download_data[str(message.from_user.id)] = {"url": url}
+
+        # quality buttons
+        buttons = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("💜 360p", callback_data="download_360"),
+                    InlineKeyboardButton("💙 480p", callback_data="download_480"),
+                ],
+                [
+                    InlineKeyboardButton("💗 720p", callback_data="download_720"),
+                    InlineKeyboardButton("💛 BEST", callback_data="download_best"),
+                ],
+            ]
+        )
+
+        caption = (
+            "✨ **Video Found!**\n\n"
+            f"🎬 **Title:** `{info['title']}`\n"
+            f"🧾 **Type:** `{info['ext']}`\n\n"
+            "🎚️ **Choose your preferred quality to download:**"
+        )
 
         await msg.delete()
-
-        if info["thumb"]:
-            await m.reply_photo(info["thumb"],
-                caption=f"🎬 **{info['title']}**\nSelect Quality👇",
-                reply_markup=kb, has_spoiler=True)
+        if info["thumbnail"]:
+            await message.reply_photo(
+                photo=info["thumbnail"],
+                caption=caption,
+                reply_markup=buttons,
+                has_spoiler=True,
+            )
         else:
-            await m.reply(f"🎬 {info['title']}\nSelect👇",reply_markup=kb)
+            await message.reply(caption, reply_markup=buttons)
 
     except Exception as e:
-        await msg.edit(f"❌ {e}")
+        await msg.edit(f"❌ **Error while analyzing:** `{e}`")
 
 
-# ========= DOWNLOAD + UPLOAD ========= #
-@bot.on_callback_query(filters.regex("^d"))
-async def down(c,q):
-    await q.answer()
-    uid=str(q.from_user.id)
-    url=download_data.get(uid)
+# ====== DOWNLOAD CALLBACK (QUALITY SELECTION) =======
+@bot.on_callback_query(filters.regex(r"^download_(360|480|720|best)$"))
+async def handle_download(client: Client, callback_query: CallbackQuery):
+    user_id = str(callback_query.from_user.id)
+    data = download_data.get(user_id)
 
-    if not url:
-        return await q.message.reply("Send again")
+    if not data:
+        return await callback_query.message.reply(
+            "⚠️ Session expired. Please send the URL again."
+        )
 
-    fmt=q.data[1:]
-    quality = {
-        "360":"best[height<=360]",
-        "480":"best[height<=480]",
-        "720":"best[height<=720]",
-        "best":"best"
-    }.get(fmt,"best")
+    # Force join check
+    ok, ch = await check_force_join(client, callback_query.from_user.id)
+    if not ok:
+        await callback_query.message.reply(
+            "🚫 **Access Denied!**\n\n"
+            "First join the required channels to use this bot.",
+            reply_markup=get_force_join_keyboard(),
+        )
+        return
 
-    status=await q.message.reply("📥 Downloading…\n"+make_bar(0))
+    quality = callback_query.data.split("_", 1)[1]
 
-    loop=asyncio.get_running_loop()
+    fmt_map = {
+        "360": "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
+        "480": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+        "720": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "best": "bestvideo+bestaudio/best",
+    }
+
+    fmt = fmt_map.get(quality, fmt_map["best"])
+    url = data["url"]
+
+    await callback_query.answer(f"⬇️ Downloading {quality}...", show_alert=False)
+    status_msg = await callback_query.message.reply(
+        "📥 **Downloading…**\n" + make_progress_bar(0)
+    )
+
+    loop = asyncio.get_running_loop()
 
     try:
-        fpath,title = await loop.run_in_executor(None,download_video,url,quality)
+        # Run blocking yt-dlp in thread
+        file_path, info = await loop.run_in_executor(
+            None, safe_download, url, fmt, "downloads/"
+        )
 
-        # Upload to dump always first
-        upmsg = await c.send_video(DUMP_CHANNEL,fpath,caption=f"Stored: {title}")
-        fid = upmsg.video.file_id
+        title = info.get("title", "Video")
 
-        # now send to user too
-        await q.message.reply_video(fid,caption=f"Uploaded: **{title}**")
+        # Upload to dump channel first (storage)
+        dump_msg = None
+        file_id = None
+        if DUMP_CHANNEL != 0:
+            try:
+                dump_msg = await client.send_video(
+                    chat_id=DUMP_CHANNEL,
+                    video=file_path,
+                    caption=f"📁 Stored: {title}",
+                )
+            except Exception as e:
+                print(f"⚠️ Upload to dump channel failed: {e}")
 
-        # shareable link ready ✔
-        if not BOT_USERNAME_CACHE["username"]:
-            BOT_USERNAME_CACHE["username"]=(await c.get_me()).username
+        if dump_msg and dump_msg.video:
+            file_id = dump_msg.video.file_id
 
-        link=f"https://t.me/{BOT_USERNAME_CACHE['username']}?start={fid}"
-        await q.message.reply(f"🔗 Share Link:\n`{link}`")
+        # If no dump channel or failed, upload directly to user
+        sent_to_user = None
+        if file_id:
+            sent_to_user = await callback_query.message.reply_video(
+                video=file_id,
+                caption=f"✅ **{title}**\nUploaded successfully!",
+            )
+        else:
+            # show upload progress bar
+            await status_msg.edit(
+                "📤 **Uploading…**\n" + make_progress_bar(0)
+            )
+            sent_to_user = await callback_query.message.reply_video(
+                video=file_path,
+                caption=f"✅ **{title}**\nUploaded successfully!",
+                progress=upload_progress,
+                progress_args=(status_msg,),
+            )
+            if sent_to_user and sent_to_user.video:
+                file_id = sent_to_user.video.file_id
 
-        await status.edit("✅ Done!")
+        # Shareable link via /start=<file_id>
+        share_link = None
+        if file_id:
+            if not BOT_USERNAME_CACHE["username"]:
+                me = await client.get_me()
+                BOT_USERNAME_CACHE["username"] = me.username
+            username = BOT_USERNAME_CACHE["username"]
+            share_link = f"https://t.me/{username}?start={file_id}"
 
-        try: os.remove(fpath)
-        except: pass
+        # Clean up download message
+        try:
+            await status_msg.edit("✅ **Done!**")
+        except Exception:
+            pass
+
+        # Delete local file to save space
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
+
+        if share_link:
+            await callback_query.message.reply(
+                f"🔗 **Shareable Link:**\n`{share_link}`\n\n"
+                "Anyone with this link can get the file via this bot."
+            )
 
     except Exception as e:
-        await status.edit(str(e))
+        try:
+            await status_msg.edit(f"❌ **Download/Upload failed:** `{e}`")
+        except Exception:
+            await callback_query.message.reply(f"❌ Download/Upload failed: `{e}`")
 
 
-# ========= START BOT ========= #
+# ====== RUN BOT =======
 keep_alive()
 bot.run()
