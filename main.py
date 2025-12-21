@@ -1,8 +1,8 @@
 import os
 import threading
 import asyncio
-import yt_dlp
 import math
+import yt_dlp
 
 from dotenv import load_dotenv
 from flask import Flask
@@ -14,10 +14,9 @@ from pyrogram.types import (
     CallbackQuery,
 )
 
-# ====== ENV LOAD ======
+# ================== ENV ==================
 load_dotenv()
 
-# ====== BOT CONFIG =======
 API_ID = int(os.getenv("API_ID", "14050586"))
 API_HASH = os.getenv("API_HASH", "42a60d9c657b106370c79bb0a8ac560c")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -28,439 +27,237 @@ FORCE_CHANNEL_1 = os.getenv("FORCE_CHANNEL_1", "@CuteBotUpdate")  # e.g. @YourCh
 FORCE_CHANNEL_2 = os.getenv("FORCE_CHANNEL_2", "@SkyRexo")        # e.g. @YourSecondChannel
 DUMP_CHANNEL = int(os.getenv("DUMP_CHANNEL", "-1003328559256"))   # e.g. -1001234567890
 
-bot = Client("xmaster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+bot = Client(
+    "xmaster_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+)
 
 app = Flask(__name__)
-download_data = {}  # store per-user URL/session
+download_data = {}
 BOT_USERNAME_CACHE = {"username": None}
 
-# ====== FLASK SERVER =======
+# ================== FLASK ==================
 @app.route("/")
 def home():
-    return "XMaster Downloader Bot is running!"
+    return "XMaster Downloader Bot Running"
 
-
-def run():
+def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-
 def keep_alive():
-    thread = threading.Thread(target=run)
-    thread.daemon = True
-    thread.start()
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
 
-
-# ====== FORCE JOIN CHECK ======
-async def check_force_join(client: Client, user_id: int):
-    """Check if user joined required channels."""
-    channels = [FORCE_CHANNEL_1, FORCE_CHANNEL_2]
-    for ch in channels:
+# ================== FORCE JOIN ==================
+async def check_force_join(client, user_id):
+    for ch in [FORCE_CHANNEL_1, FORCE_CHANNEL_2]:
         if not ch:
             continue
         try:
-            member = await client.get_chat_member(ch, user_id)
-            # banned/kicked => no access
-            if member.status in ("banned", "kicked"):
+            m = await client.get_chat_member(ch, user_id)
+            if m.status in ("kicked", "banned"):
                 return False, ch
         except UserNotParticipant:
-            # user not participant
             return False, ch
         except Exception:
-            # ignore invalid channel or other errors (bot not admin etc.)
-            continue
+            pass
     return True, None
 
-
-def get_force_join_keyboard():
-    btns = []
+def join_keyboard():
+    btn = []
     if FORCE_CHANNEL_1:
-        btns.append(
-            [InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{FORCE_CHANNEL_1.lstrip('@')}")]
-        )
+        btn.append([InlineKeyboardButton("📢 Join Channel 1", url=f"https://t.me/{FORCE_CHANNEL_1.lstrip('@')}")])
     if FORCE_CHANNEL_2:
-        btns.append(
-            [InlineKeyboardButton("📢 Join Channel 2", url=f"https://t.me/{FORCE_CHANNEL_2.lstrip('@')}")]
-        )
-    btns.append([InlineKeyboardButton("✅ I Joined", callback_data="refresh_join")])
-    return InlineKeyboardMarkup(btns)
+        btn.append([InlineKeyboardButton("📢 Join Channel 2", url=f"https://t.me/{FORCE_CHANNEL_2.lstrip('@')}")])
+    btn.append([InlineKeyboardButton("✅ I Joined", callback_data="refresh_join")])
+    return InlineKeyboardMarkup(btn)
 
+# ================== PROGRESS BAR ==================
+def bar(p):
+    p = max(0, min(100, p))
+    f = p // 10
+    return f"[{'■'*f}{'□'*(10-f)}] {p}%"
 
-# ====== PROGRESS BAR HELPER ======
-def make_progress_bar(percent: int) -> str:
-    """
-    Creates a bar like: [■■■■□□□] 40%
-    10 blocks total, 1 block per 10%
-    """
-    if percent < 0:
-        percent = 0
-    if percent > 100:
-        percent = 100
-    filled_blocks = percent // 10
-    empty_blocks = 10 - filled_blocks
-    bar = "■" * filled_blocks + "□" * empty_blocks
-    return f"[{bar}] {percent}%"
-
-
-# ====== ANALYZE FUNCTION =======
-def analyze_url(url: str):
-    """Get basic info (title, ext, thumbnail) using yt-dlp."""
+# ================== ANALYZE ==================
+def analyze_url(url):
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
-        "geo_bypass": True,
-        "ignoreerrors": False,
-        "nocheckcertificate": True,
-        "allow_unplayable_formats": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "cookiesfrombrowser": ("chrome",),
+        "extractor_args": {
+            "xhamster": {"age": ["18"]}
         },
-        "retries": 3,
-        "socket_timeout": 15,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://xhamster.com/",
+        },
+        "retries": 5,
+        "socket_timeout": 30,
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception:
-        # fallback: generic extractor
-        ydl_opts["force_generic_extractor"] = True
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
 
     if not info:
-        raise Exception("Failed to extract info from URL")
+        raise Exception("No video formats found")
 
     return {
         "title": info.get("title", "Unknown"),
-        "ext": info.get("ext", "mp4"),
         "thumbnail": info.get("thumbnail"),
     }
 
-
-# ====== DOWNLOAD FUNCTION (SYNC, USED IN THREAD) =======
-def safe_download(url: str, fmt: str, path: str = "downloads/"):
+# ================== DOWNLOAD ==================
+def safe_download(url, fmt, path="downloads/"):
     os.makedirs(path, exist_ok=True)
 
     ydl_opts = {
         "outtmpl": f"{path}%(title)s.%(ext)s",
         "format": fmt,
-        "noplaylist": True,
-        "ignoreerrors": False,
-        "geo_bypass": True,
-        "quiet": True,
-        "nocheckcertificate": True,
-        "allow_unplayable_formats": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "merge_output_format": "mp4",
+        "cookiesfrombrowser": ("chrome",),
+        "extractor_args": {
+            "xhamster": {"age": ["18"]}
         },
-        "retries": 3,
-        "socket_timeout": 30,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://xhamster.com/",
+        },
+        "quiet": True,
+        "retries": 5,
+        "socket_timeout": 60,
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except Exception as e:
-        print(f"⚠️ Normal download failed: {e}")
-        ydl_opts["force_generic_extractor"] = True
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
 
-    if not info:
-        raise Exception("Download failed, no info returned")
+    file = ydl.prepare_filename(info)
+    return file, info
 
-    title = info.get("title", "video")
-    ext = info.get("ext", "mp4")
-    file_path = f"{path}{title}.{ext}"
-    return file_path, info
-
-
-# ====== PROGRESS CALLBACK (UPLOAD) =======
-def upload_progress(current, total, message):
-    try:
-        if not total:
-            return
-        percent = math.floor(current * 100 / total)
-        if percent < 0 or percent > 100:
-            return
-        # reduce spam -> update every 5%
-        if percent % 5 != 0:
-            return
-
-        bar = make_progress_bar(percent)
-        text = f"**📤 Uploading...**\n**{bar}**"
-
-        async def edit():
-            try:
-                await message.edit_text(text)
-            except Exception:
-                pass
-
-        bot.loop.create_task(edit())
-
-    except Exception:
-        pass
-
-
-# ====== START COMMAND =======
+# ================== START ==================
 @bot.on_message(filters.command("start") & filters.private)
-async def start_handler(client: Client, message):
-    # /start <file_id> support (file-sharing link)
-    if len(message.command) > 1:
-        file_id = message.command[1]
+async def start(_, m):
+    if len(m.command) > 1:
         try:
-            await message.reply_video(
-                video=file_id,
-                caption="🔁 **Here is your requested file!**",
-            )
+            await m.reply_video(m.command[1])
         except Exception as e:
-            await message.reply(f"❌ Failed to send file: `{e}`")
+            await m.reply(str(e))
         return
 
-    # Force join check
-    ok, ch = await check_force_join(client, message.from_user.id)
+    ok, _ = await check_force_join(bot, m.from_user.id)
     if not ok:
-        await message.reply(
-            "🚫 **Access Denied!**\n\n"
-            "First join the required channels to use this bot.",
-            reply_markup=get_force_join_keyboard(),
-        )
-        return
+        return await m.reply("🚫 Join required channels first", reply_markup=join_keyboard())
 
-    # Owner notification (simple)
-    if OWNER_ID:
-        try:
-            await client.send_message(
-                OWNER_ID,
-                f"🆕 User started bot:\n"
-                f"{message.from_user.mention} (`{message.from_user.id}`)",
-            )
-        except Exception:
-            pass
-
-    btn = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("💬 Support", url="https://t.me/cutedevloper")],
-            [InlineKeyboardButton("📡 Update", url="https://t.me/cutedevlopers")],
-        ]
+    await m.reply(
+        "👋 **Send any video URL** (XHamster supported)\n\n"
+        "• Analyze\n• Choose quality\n• Download & Upload",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📢 Updates", url="https://t.me/cutedevlopers")],
+                [InlineKeyboardButton("💬 Support", url="https://t.me/cutedevloper")],
+            ]
+        ),
     )
 
-    await message.reply(
-        f"👋 **Hi {message.from_user.mention}!**\n\n"
-        "📥 Send me any supported **video URL** (XHamster, PH, etc.)\n"
-        "I will:\n"
-        "• 🔍 Fetch details & thumbnail\n"
-        "• 🎚️ Let you choose quality\n"
-        "• 📥 Download & 📤 Upload\n"
-        "• 🔗 Give you shareable link via bot\n\n"
-        "__For educational/demo use only.__",
-        reply_markup=btn,
-    )
-
-
-# ====== FORCE JOIN REFRESH CALLBACK =======
+# ================== REFRESH JOIN ==================
 @bot.on_callback_query(filters.regex("^refresh_join$"))
-async def refresh_join(client: Client, callback_query: CallbackQuery):
-    ok, ch = await check_force_join(client, callback_query.from_user.id)
-    if not ok:
-        await callback_query.answer(
-            "❌ Please join all required channels first.", show_alert=True
-        )
+async def refresh(_, q: CallbackQuery):
+    ok, _ = await check_force_join(bot, q.from_user.id)
+    if ok:
+        await q.answer("✅ Verified", show_alert=True)
+        await q.message.delete()
     else:
-        await callback_query.answer("✅ You are verified!", show_alert=True)
-        try:
-            await callback_query.message.delete()
-        except Exception:
-            pass
+        await q.answer("❌ Join all channels", show_alert=True)
 
-
-# ====== URL HANDLER =======
+# ================== URL HANDLER ==================
 @bot.on_message(filters.private & filters.text & ~filters.command("start"))
-async def handle_url(client: Client, message):
-    url = message.text.strip()
+async def url_handler(_, m):
+    url = m.text.strip()
 
-    # Block Telegram links (yt-dlp unsupported)
-    if "t.me/" in url:
-        return await message.reply(
-            "❌ **Telegram links are not supported.**\n\n"
-            "Please send a direct video page URL like XHamster / PH etc."
-        )
-
-    # Force join check
-    ok, ch = await check_force_join(client, message.from_user.id)
+    ok, _ = await check_force_join(bot, m.from_user.id)
     if not ok:
-        await message.reply(
-            "🚫 **Access Denied!**\n\n"
-            "First join the required channels to use this bot.",
-            reply_markup=get_force_join_keyboard(),
-        )
-        return
+        return await m.reply("🚫 Join required channels first", reply_markup=join_keyboard())
 
-    if not url.startswith("http"):
-        return await message.reply("❌ Please send a **valid video URL**.")
-
-    msg = await message.reply("🔎 **Analyzing video…** Please wait...")
-
+    msg = await m.reply("🔎 Analyzing...")
     try:
         info = analyze_url(url)
-        download_data[str(message.from_user.id)] = {"url": url}
+        download_data[str(m.from_user.id)] = {"url": url}
 
-        # quality buttons
         buttons = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("💜 360p", callback_data="download_360"),
-                    InlineKeyboardButton("💙 480p", callback_data="download_480"),
+                    InlineKeyboardButton("360p", callback_data="dl_360"),
+                    InlineKeyboardButton("480p", callback_data="dl_480"),
                 ],
                 [
-                    InlineKeyboardButton("💗 720p", callback_data="download_720"),
-                    InlineKeyboardButton("💛 BEST", callback_data="download_best"),
+                    InlineKeyboardButton("720p", callback_data="dl_720"),
+                    InlineKeyboardButton("BEST", callback_data="dl_best"),
                 ],
             ]
         )
 
-        caption = (
-            "✨ **Video Found!**\n\n"
-            f"🎬 **Title:** `{info['title']}`\n"
-            f"🧾 **Type:** `{info['ext']}`\n\n"
-            "🎚️ **Choose your preferred quality to download:**"
-        )
-
         await msg.delete()
-        if info["thumbnail"]:
-            await message.reply_photo(
-                photo=info["thumbnail"],
-                caption=caption,
-                reply_markup=buttons,
-                has_spoiler=True,
-            )
-        else:
-            await message.reply(caption, reply_markup=buttons)
+        await m.reply_photo(
+            info["thumbnail"],
+            caption=f"🎬 **{info['title']}**\n\nChoose quality:",
+            reply_markup=buttons,
+            has_spoiler=True,
+        )
 
     except Exception as e:
-        await msg.edit(f"❌ **Error while analyzing:** `{e}`")
+        await msg.edit(f"❌ {e}")
 
+# ================== DOWNLOAD CALLBACK ==================
+@bot.on_callback_query(filters.regex("^dl_"))
+async def download_cb(_, q: CallbackQuery):
+    user = str(q.from_user.id)
+    if user not in download_data:
+        return await q.answer("Session expired", show_alert=True)
 
-# ====== DOWNLOAD CALLBACK (QUALITY SELECTION) =======
-@bot.on_callback_query(filters.regex(r"^download_(360|480|720|best)$"))
-async def handle_download(client: Client, callback_query: CallbackQuery):
-    user_id = str(callback_query.from_user.id)
-    data = download_data.get(user_id)
-
-    if not data:
-        return await callback_query.message.reply(
-            "⚠️ Session expired. Please send the URL again."
-        )
-
-    # Force join check
-    ok, ch = await check_force_join(client, callback_query.from_user.id)
-    if not ok:
-        await callback_query.message.reply(
-            "🚫 **Access Denied!**\n\n"
-            "First join the required channels to use this bot.",
-            reply_markup=get_force_join_keyboard(),
-        )
-        return
-
-    quality = callback_query.data.split("_", 1)[1]
+    quality = q.data.split("_")[1]
+    url = download_data[user]["url"]
 
     fmt_map = {
-        "360": "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
-        "480": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
-        "720": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-        "best": "bestvideo+bestaudio/best",
+        "360": "best[height<=360]",
+        "480": "best[height<=480]",
+        "720": "best[height<=720]",
+        "best": "best",
     }
 
-    fmt = fmt_map.get(quality, fmt_map["best"])
-    url = data["url"]
-
-    await callback_query.answer(f"⬇️ Downloading {quality}...", show_alert=False)
-    status_msg = await callback_query.message.reply(
-        "📥 **Downloading…**\n" + make_progress_bar(0)
-    )
+    status = await q.message.reply(f"⬇️ Downloading...\n{bar(0)}")
 
     loop = asyncio.get_running_loop()
-
     try:
-        # Run blocking yt-dlp in thread
-        file_path, info = await loop.run_in_executor(
-            None, safe_download, url, fmt, "downloads/"
-        )
+        file, info = await loop.run_in_executor(None, safe_download, url, fmt_map[quality])
 
-        title = info.get("title", "Video")
+        sent = None
+        if DUMP_CHANNEL:
+            sent = await bot.send_video(DUMP_CHANNEL, file)
 
-        # Upload to dump channel first (storage)
-        dump_msg = None
-        file_id = None
-        if DUMP_CHANNEL != 0:
-            try:
-                dump_msg = await client.send_video(
-                    chat_id=DUMP_CHANNEL,
-                    video=file_path,
-                    caption=f"📁 Stored: {title}",
-                )
-            except Exception as e:
-                print(f"⚠️ Upload to dump channel failed: {e}")
-
-        if dump_msg and dump_msg.video:
-            file_id = dump_msg.video.file_id
-
-        # If no dump channel or failed, upload directly to user
-        sent_to_user = None
-        if file_id:
-            sent_to_user = await callback_query.message.reply_video(
-                video=file_id,
-                caption=f"✅ **{title}**\nUploaded successfully!",
-            )
+        if sent and sent.video:
+            await q.message.reply_video(sent.video.file_id)
         else:
-            # show upload progress bar
-            await status_msg.edit(
-                "📤 **Uploading…**\n" + make_progress_bar(0)
-            )
-            sent_to_user = await callback_query.message.reply_video(
-                video=file_path,
-                caption=f"✅ **{title}**\nUploaded successfully!",
-                progress=upload_progress,
-                progress_args=(status_msg,),
-            )
-            if sent_to_user and sent_to_user.video:
-                file_id = sent_to_user.video.file_id
+            await q.message.reply_video(file)
 
-        # Shareable link via /start=<file_id>
-        share_link = None
-        if file_id:
-            if not BOT_USERNAME_CACHE["username"]:
-                me = await client.get_me()
-                BOT_USERNAME_CACHE["username"] = me.username
-            username = BOT_USERNAME_CACHE["username"]
-            share_link = f"https://t.me/{username}?start={file_id}"
+        await status.edit("✅ Done")
 
-        # Clean up download message
-        try:
-            await status_msg.edit("✅ **Done!**")
-        except Exception:
-            pass
-
-        # Delete local file to save space
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
-
-        if share_link:
-            await callback_query.message.reply(
-                f"🔗 **Shareable Link:**\n`{share_link}`\n\n"
-                "Anyone with this link can get the file via this bot."
-            )
+        if os.path.exists(file):
+            os.remove(file)
 
     except Exception as e:
-        try:
-            await status_msg.edit(f"❌ **Download/Upload failed:** `{e}`")
-        except Exception:
-            await callback_query.message.reply(f"❌ Download/Upload failed: `{e}`")
+        await status.edit(f"❌ {e}")
 
-
-# ====== RUN BOT =======
+# ================== RUN ==================
 keep_alive()
 bot.run()
